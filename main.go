@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"github.com/bwmarrin/discordgo"
 	"io"
 	"log"
@@ -13,38 +14,44 @@ import (
 	"syscall"
 )
 
+// Config struct holds the configuration settings for the bot.
 type Config struct {
-	Token  string `json:"token"`
-	Prefix string `json:"prefix"`
+	Token  string `json:"token"`  // Bot token used to authenticate with Discord API.
+	Prefix string `json:"prefix"` // Prefix for bot commands.
 }
 
 var config Config
 
 func main() {
-	loadConfig("config.json")
+	// Load configuration from 'config.json' file.
+	err := loadConfig("config.json")
+	if err != nil {
+		log.Println("Error loading configuration:", err.Error())
+		return
+	}
 
 	// Create a new Discord session using the provided bot token.
 	dg, err := discordgo.New("Bot " + config.Token)
 	if err != nil {
-		log.Println("error creating Discord session,", err)
+		log.Println("Error creating Discord session:", err.Error())
 		return
 	}
 
-	// Register the messageCreate func as a callback for MessageCreate events.
+	// Register the messageCreate function as a callback for MessageCreate events.
 	dg.AddHandler(messageCreate)
 
-	// In this example, we only care about receiving message events.
+	// Set up the bot to receive message events.
 	dg.Identify.Intents = discordgo.IntentsGuildMessages
 
-	// Open a websocket connection to Discord and begin listening.
+	// Open a websocket connection to Discord and start listening.
 	err = dg.Open()
 	if err != nil {
-		log.Println("error opening connection,", err)
+		log.Println("Error opening connection:", err.Error())
 		return
 	}
 
-	// Wait here until CTRL-C or other term signal is received.
-	log.Println("Bot is now running.  Press CTRL-C to exit.")
+	// Wait here until CTRL-C or other termination signal is received.
+	log.Println("Bot is now running. Press CTRL-C to exit.")
 	sc := make(chan os.Signal, 1)
 	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt, os.Kill)
 	<-sc
@@ -53,79 +60,105 @@ func main() {
 	dg.Close()
 }
 
+// messageCreate is the callback function to handle incoming messages from Discord.
 func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
-	//Ignore messages created by the bot
+	// Ignore messages created by the bot itself.
 	if m.Author.ID == s.State.User.ID {
 		return
 	}
 
 	log.Println(m.Content)
 
-	//Commands
+	// Handle bot commands.
 	if strings.HasPrefix(m.Content, config.Prefix) {
-		m.Content = strings.TrimPrefix(m.Content, config.Prefix)
-		if m.Content == "ping" {
+		command := strings.TrimPrefix(m.Content, config.Prefix)
+
+		// Handle 'ping' command.
+		if command == "ping" {
 			_, err := s.ChannelMessageSend(m.ChannelID, "Pong!")
 			if err != nil {
-				log.Println("error sending message: ", err)
+				log.Println("Error sending message:", err.Error())
 				return
 			}
 		}
-		if strings.HasPrefix(m.Content, "roll") {
-			var r string
-			r = strings.TrimPrefix(m.Content, "roll ")
-			a, t := roll(r)
+
+		// Handle 'roll' command.
+		if strings.HasPrefix(command, "roll") {
+			rollCommand := strings.TrimPrefix(command, "roll ")
+			dice, total, err := roll(rollCommand)
+			if err != nil {
+				log.Println("Error rolling dice:", err.Error())
+				return
+			}
 			var message string
 			message = "Rolls: "
-			for i := range a {
-				message = message + strconv.Itoa(a[i]) + " "
+			for i := range dice {
+				message = message + strconv.Itoa(dice[i]) + " "
 			}
-			message = message + "\nTotal: " + strconv.Itoa(t)
-			_, err := s.ChannelMessageSend(m.ChannelID, message)
+			message = message + "\nTotal: " + strconv.Itoa(total)
+			_, err = s.ChannelMessageSend(m.ChannelID, message)
 			if err != nil {
-				log.Println("error sending message: ", err)
+				log.Println("Error sending message:", err.Error())
 				return
 			}
 		}
 	}
 }
 
-func loadConfig(dp string) {
-	log.Println("Hello World")
-	//Open Config
-	configFile, err := os.Open(dp)
-	//Check for error
+// loadConfig loads configuration from a JSON file and populates the config variable.
+func loadConfig(filePath string) error {
+	log.Println("Loading configuration...")
+	// Open the config file.
+	configFile, err := os.Open(filePath)
 	if err != nil {
-		log.Println(err)
-		return
+		return errors.New("error opening config file: " + err.Error())
 	}
-	log.Println("Successfully opened config file")
-	//defer closing of file
-	defer func(configFile *os.File) {
-		err := configFile.Close()
-		if err != nil {
+	defer configFile.Close()
 
-		}
-	}(configFile)
+	// Read and unmarshal the JSON data into the config variable.
+	byteValue, err := io.ReadAll(configFile)
+	if err != nil {
+		return errors.New("error reading config file: " + err.Error())
+	}
 
-	//Read in config
-	byteValue, _ := io.ReadAll(configFile)
+	err = json.Unmarshal(byteValue, &config)
+	if err != nil {
+		return errors.New("error unmarshalling config data: " + err.Error())
+	}
 
-	json.Unmarshal(byteValue, &config)
-	//For testing reading of token
-	log.Println(config.Token)
-	log.Println(config.Prefix)
+	// For testing the reading of token and prefix.
+	log.Println("Config loaded successfully.")
+	log.Println("Bot Token:", config.Token)
+	log.Println("Command Prefix:", config.Prefix)
+
+	return nil
 }
 
-func roll(r string) (a []int, t int) {
-	s := strings.Split(r, "d")
-	num, _ := strconv.Atoi(s[0])
-	sides, _ := strconv.Atoi(s[1])
+// roll simulates rolling dice based on the provided input.
+func roll(input string) ([]int, int, error) {
+	components := strings.Split(input, "d")
+	if len(components) != 2 {
+		return nil, 0, errors.New("invalid roll command format")
+	}
+
+	num, err := strconv.Atoi(components[0])
+	if err != nil {
+		return nil, 0, errors.New("invalid number of dice: " + err.Error())
+	}
+
+	sides, err := strconv.Atoi(components[1])
+	if err != nil {
+		return nil, 0, errors.New("invalid number of sides: " + err.Error())
+	}
+
+	var dice []int
+	var total int
 
 	for i := 0; i < num; i++ {
 		n := rand.Intn(sides) + 1
-		a = append(a, n)
-		t = t + n
+		dice = append(dice, n)
+		total += n
 	}
-	return
+
+	return dice, total, nil
 }
