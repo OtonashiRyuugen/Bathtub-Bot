@@ -1,9 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/bwmarrin/discordgo"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 	"io"
 	"log"
 	"math/rand"
@@ -16,24 +21,60 @@ import (
 
 // Config struct holds the configuration settings for the bot.
 type Config struct {
-	Token  string `json:"token"`  // Bot token used to authenticate with Discord API.
-	Prefix string `json:"prefix"` // Prefix for bot commands.
+	Token  string `json:"token"`
+	Prefix string `json:"prefix"`
+	DbProt string `json:"dbProt"`
+	DbUser string `json:"dbUser"`
+	DbPass string `json:"dbPass"`
+	DbHost string `json:"dbHost"`
+	DbOptn string `json:"dbOptn"`
+	DbName string `json:"dbName"`
+	DbUri  string
+}
+
+type Player struct {
+	Id       string
+	CharName string
+	Gold     int
+	Items    []int
+}
+
+type Item struct {
+	Id   int
+	Name string
+	Desc string
+	Cost string
+	Sell string
+}
+
+type Store struct {
+	Id   int
+	Name string
+	Inv  []int
 }
 
 var config Config
+var db *mongo.Client
 
 func main() {
 	// Load configuration from 'config.json' file.
 	err := loadConfig("config.json")
 	if err != nil {
-		log.Println("Error loading configuration:", err.Error())
+		log.Println("Error loading configuration: ", err.Error())
+		return
+	}
+
+	// Connect and test DB
+	db, err = connectDB(config.DbUri, config.DbName)
+	if err != nil {
+		log.Println("Error connecting to DB: ", err.Error())
 		return
 	}
 
 	// Create a new Discord session using the provided bot token.
 	dg, err := discordgo.New("Bot " + config.Token)
 	if err != nil {
-		log.Println("Error creating Discord session:", err.Error())
+		log.Println("Error creating Discord session: ", err.Error())
 		return
 	}
 
@@ -46,7 +87,7 @@ func main() {
 	// Open a websocket connection to Discord and start listening.
 	err = dg.Open()
 	if err != nil {
-		log.Println("Error opening connection:", err.Error())
+		log.Println("Error opening connection: ", err.Error())
 		return
 	}
 
@@ -58,6 +99,10 @@ func main() {
 
 	// Cleanly close down the Discord session.
 	dg.Close()
+	err = db.Disconnect(context.TODO())
+	if err != nil {
+		return
+	}
 }
 
 // messageCreate is the callback function to handle incoming messages from Discord.
@@ -102,6 +147,26 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 				return
 			}
 		}
+
+		// Handle 'newplayer' command.
+		if strings.HasPrefix(command, "newplayer") {
+			// Extract userID and name from the message.
+			parts := strings.Split(command, " ")
+			if len(parts) != 3 {
+				log.Println("Invalid command format. Correct usage: !newplayer <@userID> Name")
+				return
+			}
+
+			userID := parts[1]
+			name := parts[2]
+
+			// Call newPlayer to create a new player in the database.
+			err := newPlayer(userID, name, db, config.DbName)
+			if err != nil {
+				log.Println("Error creating new player:", err.Error())
+				return
+			}
+		}
 	}
 }
 
@@ -131,6 +196,7 @@ func loadConfig(filePath string) error {
 	log.Println("Bot Token:", config.Token)
 	log.Println("Command Prefix:", config.Prefix)
 
+	config.DbUri = config.DbProt + "://" + config.DbUser + ":" + config.DbPass + "@" + config.DbHost + "/?" + config.DbOptn
 	return nil
 }
 
@@ -161,4 +227,70 @@ func roll(input string) ([]int, int, error) {
 	}
 
 	return dice, total, nil
+}
+
+// connectDB initializes and connects to the DB
+func connectDB(uri string, dbName string) (*mongo.Client, error) {
+	// Use the SetServerAPIOptions() method to set the Stable API version to 1
+	serverAPI := options.ServerAPI(options.ServerAPIVersion1)
+	opts := options.Client().ApplyURI(uri).SetServerAPIOptions(serverAPI)
+
+	// Create a new client and connect to the server
+	client, err := mongo.Connect(context.TODO(), opts)
+	if err != nil {
+		return nil, err
+	}
+
+	// Send a ping to confirm a successful connection
+	var result bson.M
+	if err := client.Database(dbName).RunCommand(context.TODO(), bson.D{{"ping", 1}}).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	log.Println("Pinged your deployment. You successfully connected to MongoDB!")
+	return client, nil
+}
+
+func updatePlayer(client *mongo.Client, player *Player, dbName string) error {
+	collection := client.Database(dbName).Collection("BathtubPlayers")
+
+	// Check if the player with the given ID already exists
+	filter := bson.M{"id": player.Id}
+	existingPlayer := Player{}
+	err := collection.FindOne(context.TODO(), filter).Decode(&existingPlayer)
+
+	if err == nil {
+		// Player exists, update the entry
+		update := bson.M{"$set": bson.M{"charname": player.CharName, "gold": player.Gold, "items": player.Items}}
+		_, err = collection.UpdateOne(context.TODO(), filter, update)
+		if err != nil {
+			return fmt.Errorf("error updating player: %v", err)
+		}
+	} else {
+		// Player doesn't exist, insert as a new player
+		_, err = collection.InsertOne(context.TODO(), player)
+		if err != nil {
+			return fmt.Errorf("error inserting new player: %v", err)
+		}
+	}
+
+	return nil
+}
+
+func newPlayer(userID, name string, client *mongo.Client, dbName string) error {
+	// Create a new Player
+	newPlayer := Player{
+		Id:       userID,
+		CharName: name,
+		Gold:     100,
+		Items:    []int{},
+	}
+
+	// Call updatePlayer to push the new player to the database
+	err := updatePlayer(client, &newPlayer, dbName)
+	if err != nil {
+		return fmt.Errorf("error creating new player: %v", err)
+	}
+
+	return nil
 }
